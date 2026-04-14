@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IPC Debugger — OS Visualization Tool</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/Index.css">
+<script src="/Index.js"></script>
+</head>
+<body>
+    
+<div class="app-wrapper">
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚙</div>
+      <div>
+        <div class="brand-name">IPC Debugger</div>
+        <div class="brand-sub">OS Visualization Tool</div>
+      </div>
+    </div>
+    <div class="header-status">
+      <div class="status-pill">
+        <div class="status-dot idle" id="global-status-dot"></div>
+        <span id="global-status-text">Idle</span>
+      </div>
+      <div class="ipc-mode-badge" id="active-mode-badge">PIPE MODE</div>
+    </div>
+  </header>
+  <main>
+    <section class="sim-area">
+      <div>
+        <div class="section-label">IPC Mechanism</div>
+        <div class="method-tabs">
+          <button class="method-tab active" data-method="pipe" onclick="switchMethod('pipe')">
+            <span class="tab-icon">⇒</span>Pipes
+          </button>
+          <button class="method-tab" data-method="mq" onclick="switchMethod('mq')">
+            <span class="tab-icon">📬</span>Msg Queue
+          </button>
+          <button class="method-tab" data-method="shm" onclick="switchMethod('shm')">
+            <span class="tab-icon">🧠</span>Shared Mem
+          </button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Debug Detector</div>
+        <div class="debug-alerts">
+          <div class="debug-alert" id="alert-deadlock" data-tip="Circular wait detected">
+            <span class="alert-icon">🔴</span>Deadlock
+          </div>
+          <div class="debug-alert" id="alert-race" data-tip="Simultaneous write conflict">
+            <span class="alert-icon">⚡</span>Race Condition
+          </div>
+          <div class="debug-alert" id="alert-bottleneck" data-tip="Queue overflow / delay">
+            <span class="alert-icon">🟡</span>Bottleneck
+          </div>
+          <div class="debug-alert" id="alert-inconsist" data-tip="Partial / corrupt data">
+            <span class="alert-icon">🟣</span>Inconsistency
+          </div>
+        </div>
+      </div>
+      <div class="sim-stage" id="sim-stage">
+        <div class="ipc-channel-wrapper" id="svg-layer">
+          <svg id="ipc-svg" viewBox="0 0 800 300" preserveAspectRatio="none">
+            <g id="pipe-arrows">
+              <line id="arrow-p1p2" class="pipe-arrow-line" x1="22%" y1="50%" x2="46%" y2="50%"/>
+              <polygon id="head-p1p2" class="pipe-arrow-head" points="370,145 355,138 355,152"/>
+              <line id="arrow-p2p3" class="pipe-arrow-line" x1="55%" y1="50%" x2="78%" y2="50%"/>
+              <polygon id="head-p2p3" class="pipe-arrow-head" points="630,145 615,138 615,152"/>
+              <path id="arrow-p3p1" class="pipe-arrow-line" d="M 78% 60% Q 50% 90% 22% 60%" stroke-dasharray="6 8" opacity="0.35"/>
+            </g>
+          </svg>
+        </div>
+        <div class="processes-row">
+          <div class="process-box idle" id="proc-p1">
+            <div class="process-id">P1</div>
+            <div class="process-name">Producer</div>
+            <div class="process-state-badge">
+              <div class="state-dot-small"></div>
+              <span id="state-p1">IDLE</span>
+            </div>
+            <div class="process-metrics">
+              <div class="metric-row">
+                <span>Sent</span><span class="metric-val" id="metric-p1-sent">0</span>
+              </div>
+              <div class="metric-row">
+                <span>PID</span><span class="metric-val">1001</span>
+              </div>
+            </div>
+          </div>
+          <div style="flex:1; position:relative; min-height:120px;">
+            <div class="pipe-view active" id="view-pipe">
+              <div style="text-align:center; color: var(--text-muted); font-size:0.65rem; padding-top:20px; letter-spacing:0.06em;">
+                ↔ Direct pipe channel active
+              </div>
+            </div>
+            <div class="mq-view" id="view-mq">
+              <div class="mq-container">
+                <div class="mq-label">Message Queue (FIFO)</div>
+                <div class="mq-slots" id="mq-slots">
+                  <div class="mq-slot" data-i="0">empty</div>
+                  <div class="mq-slot" data-i="1">empty</div>
+                  <div class="mq-slot" data-i="2">empty</div>
+                  <div class="mq-slot" data-i="3">empty</div>
+                </div>
+                <div style="width:100%; display:flex; align-items:center; gap:6px;">
+                  <span style="font-size:0.6rem; color:var(--text-muted)">Queue</span>
+                  <div class="mq-size-bar" style="flex:1">
+                    <div class="mq-size-fill" id="mq-fill" style="width:0%"></div>
+                  </div>
+                  <span style="font-size:0.6rem; color:var(--cyan)" id="mq-count">0/4</span>
+                </div>
+              </div>
+            </div>
+            <div class="shm-view" id="view-shm">
+              <div class="shm-block">
+                <div class="shm-header">
+                  <span>SHARED MEMORY — 0x7F00</span>
+                  <span id="shm-lock-status">UNLOCKED 🔓</span>
+                </div>
+                <div class="shm-segments" id="shm-segs">
+                  <div class="shm-seg" data-seg="0">—</div>
+                  <div class="shm-seg" data-seg="1">—</div>
+                  <div class="shm-seg" data-seg="2">—</div>
+                  <div class="shm-seg" data-seg="3">—</div>
+                  <div class="shm-seg" data-seg="4">—</div>
+                  <div class="shm-seg" data-seg="5">—</div>
+                  <div class="shm-seg" data-seg="6">—</div>
+                  <div class="shm-seg" data-seg="7">—</div>
+                </div>
+              </div>
+              <div class="shm-access-indicator">
+                <div class="shm-indicator" id="shm-ind-p1">
+                  <div class="ind-dot"></div>P1
+                </div>
+                <div class="shm-indicator" id="shm-ind-p2">
+                  <div class="ind-dot"></div>P2
+                </div>
+                <div class="shm-indicator" id="shm-ind-p3">
+                  <div class="ind-dot"></div>P3
+                </div>
+              </div>
+            </div>
+          </div>
+ 
+          <div class="process-box idle" id="proc-p2">
+            <div class="process-id">P2</div>
+            <div class="process-name">Consumer</div>
+            <div class="process-state-badge">
+              <div class="state-dot-small"></div>
+              <span id="state-p2">IDLE</span>
+            </div>
+            <div class="process-metrics">
+              <div class="metric-row">
+                <span>Recv</span><span class="metric-val" id="metric-p2-recv">0</span>
+              </div>
+              <div class="metric-row">
+                <span>PID</span><span class="metric-val">1002</span>
+              </div>
+            </div>
+          </div>
+ 
+          <div class="process-box idle" id="proc-p3">
+            <div class="process-id">P3</div>
+            <div class="process-name">Monitor</div>
+            <div class="process-state-badge">
+              <div class="state-dot-small"></div>
+              <span id="state-p3">IDLE</span>
+            </div>
+            <div class="process-metrics">
+              <div class="metric-row">
+                <span>Recv</span><span class="metric-val" id="metric-p3-recv">0</span>
+              </div>
+              <div class="metric-row">
+                <span>PID</span><span class="metric-val">1003</span>
+              </div>
+            </div>
+          </div>
+        </div>
+ 
+      </div>
+      <div>
+        <div class="section-label">Performance Metrics</div>
+        <div class="perf-bars">
+          <div class="perf-bar-row" id="bar-throughput">
+            <span class="perf-bar-label">Throughput</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill" id="fill-throughput" style="width:0%"></div></div>
+            <span class="perf-bar-val" id="val-throughput">0%</span>
+          </div>
+          <div class="perf-bar-row" id="bar-latency">
+            <span class="perf-bar-label">Latency</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill" id="fill-latency" style="width:0%"></div></div>
+            <span class="perf-bar-val" id="val-latency">0ms</span>
+          </div>
+          <div class="perf-bar-row" id="bar-cpu">
+            <span class="perf-bar-label">CPU Load</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill" id="fill-cpu" style="width:0%"></div></div>
+            <span class="perf-bar-val" id="val-cpu">0%</span>
+          </div>
+          <div class="perf-bar-row" id="bar-mem">
+            <span class="perf-bar-label">Mem Usage</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill" id="fill-mem" style="width:0%"></div></div>
+            <span class="perf-bar-val" id="val-mem">0MB</span>
+          </div>
+        </div>
+      </div>
+ 
+    </section>
+    <section class="control-panel">
+ 
+      <div class="section-label">Simulation Control</div>
+ 
+      <div class="ctrl-buttons">
+        <button class="btn btn-start" id="btn-start" onclick="startSimulation()">▶ Start</button>
+        <button class="btn btn-pause" id="btn-pause" onclick="pauseSimulation()" disabled>⏸ Pause</button>
+        <button class="btn btn-reset" id="btn-reset" onclick="resetSimulation()">↺ Reset</button>
+      </div>
+      <div>
+        <div class="section-label">Data Payload</div>
+        <div style="display:flex; gap:6px;">
+          <input id="msg-input" type="text" value="Hello IPC"
+            style="flex:1; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm);
+                   color:var(--text-primary); font-family:var(--font-mono); font-size:0.72rem; padding:7px 10px;
+                   outline:none; transition:var(--transition);"
+            onfocus="this.style.borderColor='var(--blue)'"
+            onblur="this.style.borderColor='var(--border)'"
+            placeholder="Type payload..."
+          />
+          <button class="btn" onclick="manualSend()" style="flex-shrink:0; padding:7px 12px;">Send</button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Inject Scenario</div>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <button class="btn-scenario scenario-deadlock" onclick="injectDeadlock()">
+            <span class="scenario-icon">🔴</span>Inject Deadlock
+          </button>
+          <button class="btn-scenario scenario-race" onclick="injectRaceCondition()">
+            <span class="scenario-icon">⚡</span>Inject Race Condition
+          </button>
+          <button class="btn-scenario scenario-bottleneck" onclick="injectBottleneck()">
+            <span class="scenario-icon">🟡</span>Inject Bottleneck
+          </button>
+          <button class="btn-scenario" onclick="injectInconsistency()">
+            <span class="scenario-icon">🟣</span>Inject Inconsistency
+          </button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Simulation Speed</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:0.62rem; color:var(--text-muted)">Slow</span>
+          <input type="range" id="speed-slider" min="0.5" max="3" step="0.5" value="1"
+            style="flex:1; accent-color:var(--blue);"
+            oninput="updateSpeed(this.value)"
+          />
+          <span style="font-size:0.62rem; color:var(--cyan)" id="speed-label">1×</span>
+        </div>
+      </div>
+ 
+    </section>
+    <section class="log-panel">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div class="section-label" style="margin-bottom:0; flex:1">Event Log</div>
+        <button class="log-clear-btn" onclick="clearLog()">Clear</button>
+      </div>
+ 
+      <div class="log-scroll" id="log-scroll">
+        <div class="log-entry system">
+          <div class="log-indicator"></div>
+          <span class="log-time">00:00</span>
+          <span class="log-msg">IPC Debugger initialized. Select a method and press Start.</span>
+        </div>
+      </div>
+    </section>
+ 
+  </main>
+  <footer>
+    <div class="footer-text">IPC Debugger v2.0 — OS Academic Visualization Tool</div>
+    <div class="footer-legend">
+      <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>Running</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div>Waiting</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div>Blocked</div>
+    </div>
+  </footer>
+ 
+</div>
+</body>
+</html>
+ 

@@ -1,0 +1,735 @@
+
+
+
+const state = {
+  method:    'pipe',
+  running:   false,
+  paused:    false,
+  speed:     1.0,
+  tick:      0,
+  timers:    [],
+  msgQueue:  [],
+  shmData:   new Array(8).fill('—'),
+  metrics: {
+    p1Sent: 0, p2Recv: 0, p3Recv: 0,
+    throughput: 0, latency: 0, cpu: 0, mem: 0
+  },
+  deadlockActive:    false,
+  raceActive:        false,
+  bottleneckActive:  false,
+  inconsistActive:   false,
+  startTime: null,
+};
+ 
+
+const STATES = { IDLE:'idle', RUNNING:'running', WAITING:'waiting', BLOCKED:'blocked', ERROR:'error' };
+ 
+
+
+
+function setProcessState(proc, s) {
+  const el = document.getElementById(`proc-${proc}`);
+  const stateEl = document.getElementById(`state-${proc}`);
+  el.className = `process-box ${s}`;
+  stateEl.textContent = s.toUpperCase();
+}
+ 
+
+
+
+function addLog(msg, type = 'info') {
+  const scroll = document.getElementById('log-scroll');
+  const now = state.startTime
+    ? ((Date.now() - state.startTime) / 1000).toFixed(1) + 's'
+    : '00:00';
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  entry.innerHTML = `
+    <div class="log-indicator"></div>
+    <span class="log-time">${now}</span>
+    <span class="log-msg">${msg}</span>
+  `;
+  scroll.appendChild(entry);
+  scroll.scrollTop = scroll.scrollHeight;
+
+  while (scroll.children.length > 120) scroll.removeChild(scroll.firstChild);
+}
+ 
+
+
+
+function animatePacket(fromEl, toEl, label, cls, callback) {
+  const stage = document.getElementById('sim-stage');
+  const stageRect = stage.getBoundingClientRect();
+  const fromRect = fromEl.getBoundingClientRect();
+  const toRect   = toEl.getBoundingClientRect();
+ 
+  const startX = fromRect.left + fromRect.width / 2 - stageRect.left;
+  const startY = fromRect.top  + fromRect.height / 2 - stageRect.top;
+  const endX   = toRect.left   + toRect.width  / 2 - stageRect.left;
+  const endY   = toRect.top    + toRect.height / 2 - stageRect.top;
+ 
+  const pkt = document.createElement('div');
+  pkt.className = `data-packet ${cls}`;
+  pkt.textContent = label;
+  pkt.style.left = startX + 'px';
+  pkt.style.top  = startY + 'px';
+  stage.appendChild(pkt);
+ 
+  const duration = 900 / state.speed;
+  const startTime = performance.now();
+ 
+  function frame(now) {
+    const t = Math.min((now - startTime) / duration, 1);
+
+    const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    pkt.style.left = (startX + (endX - startX) * ease) + 'px';
+    pkt.style.top  = (startY + (endY - startY) * ease) + 'px';
+    pkt.style.opacity = t < 0.1 ? t * 10 : t > 0.85 ? (1 - t) * 6.67 : 1;
+    if (t < 1) {
+      requestAnimationFrame(frame);
+    } else {
+      pkt.remove();
+      if (callback) callback();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+ 
+
+
+
+function triggerAlert(id, cls) {
+  const el = document.getElementById(`alert-${id}`);
+  el.className = `debug-alert triggered ${cls}`;
+}
+function clearAlert(id) {
+  const el = document.getElementById(`alert-${id}`);
+  el.className = 'debug-alert';
+}
+ 
+
+
+
+function setGlobalStatus(s, label) {
+  const dot  = document.getElementById('global-status-dot');
+  const text = document.getElementById('global-status-text');
+  dot.className = `status-dot ${s}`;
+  text.textContent = label;
+}
+ 
+
+
+
+function switchMethod(method) {
+  if (state.running) resetSimulation();
+  state.method = method;
+ 
+
+  document.querySelectorAll('.method-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.method === method);
+  });
+ 
+
+  document.getElementById('view-pipe').className = 'pipe-view' + (method === 'pipe' ? ' active' : '');
+  document.getElementById('view-mq').className   = 'mq-view'   + (method === 'mq'   ? ' active' : '');
+  document.getElementById('view-shm').className  = 'shm-view'  + (method === 'shm'  ? ' active' : '');
+ 
+
+  document.getElementById('pipe-arrows').style.opacity = method === 'pipe' ? '1' : '0';
+ 
+
+  const badges = { pipe:'PIPE MODE', mq:'MSG QUEUE', shm:'SHARED MEM' };
+  document.getElementById('active-mode-badge').textContent = badges[method];
+ 
+  addLog(`Switched to ${badges[method]}`, 'system');
+}
+ 
+
+
+
+function startSimulation() {
+  if (state.running && !state.paused) return;
+ 
+  if (state.paused) {
+    state.paused = false;
+    state.running = true;
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-pause').disabled = false;
+    addLog('Simulation resumed.', 'info');
+    setGlobalStatus('', 'Running');
+    runSimulationLoop();
+    return;
+  }
+ 
+  state.running = true;
+  state.paused = false;
+  state.startTime = Date.now();
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-pause').disabled = false;
+ 
+  setGlobalStatus('', 'Running');
+  addLog(`Simulation started — Method: ${state.method.toUpperCase()}`, 'success');
+ 
+
+  ['p1','p2','p3'].forEach(p => setProcessState(p, STATES.IDLE));
+  resetMetrics();
+ 
+
+  runSimulationLoop();
+  startPerfUpdate();
+}
+ 
+
+
+
+function runSimulationLoop() {
+  if (state.method === 'pipe') runPipeSimulation();
+  else if (state.method === 'mq') runMQSimulation();
+  else if (state.method === 'shm') runSHMSimulation();
+}
+ 
+
+
+
+function runPipeSimulation() {
+  if (!state.running || state.paused) return;
+  const payload = document.getElementById('msg-input').value || 'Hello';
+  const delay   = ms => ms / state.speed;
+ 
+  const p1 = document.getElementById('proc-p1');
+  const p2 = document.getElementById('proc-p2');
+  const p3 = document.getElementById('proc-p3');
+ 
+
+  document.getElementById('arrow-p1p2').classList.add('active');
+ 
+  setProcessState('p1', STATES.RUNNING);
+  addLog(`P1 writing "${payload}" to pipe →`, 'info');
+ 
+  const t1 = setTimeout(() => {
+    if (!state.running || state.paused) return;
+    animatePacket(p1, p2, payload, 'pipe-packet', () => {
+      if (!state.running) return;
+      setProcessState('p1', STATES.WAITING);
+      setProcessState('p2', STATES.RUNNING);
+      state.metrics.p1Sent++;
+      state.metrics.p2Recv++;
+      updateMetricDisplay();
+      addLog(`P2 received "${payload}" from pipe`, 'success');
+ 
+
+      const t2 = setTimeout(() => {
+        if (!state.running || state.paused) return;
+        document.getElementById('arrow-p2p3').classList.add('active');
+        animatePacket(p2, p3, payload, 'pipe-packet', () => {
+          if (!state.running) return;
+          setProcessState('p2', STATES.WAITING);
+          setProcessState('p3', STATES.RUNNING);
+          state.metrics.p3Recv++;
+          updateMetricDisplay();
+          addLog(`P3 received "${payload}" via pipe`, 'success');
+ 
+          const t3 = setTimeout(() => {
+            if (!state.running || state.paused) return;
+            setProcessState('p3', STATES.WAITING);
+            setProcessState('p1', STATES.RUNNING);
+            document.getElementById('arrow-p1p2').classList.remove('active');
+            document.getElementById('arrow-p2p3').classList.remove('active');
+ 
+
+            const tLoop = setTimeout(runPipeSimulation, delay(1800));
+            state.timers.push(tLoop);
+          }, delay(600));
+          state.timers.push(t3);
+        });
+      }, delay(700));
+      state.timers.push(t2);
+    });
+  }, delay(600));
+  state.timers.push(t1);
+}
+ 
+
+
+
+let mqMessages = [];
+ 
+function runMQSimulation() {
+  if (!state.running || state.paused) return;
+  const payload = document.getElementById('msg-input').value || 'MSG';
+  const delay   = ms => ms / state.speed;
+ 
+  const p1 = document.getElementById('proc-p1');
+  const p2 = document.getElementById('proc-p2');
+  const p3 = document.getElementById('proc-p3');
+ 
+  setProcessState('p1', STATES.RUNNING);
+  addLog(`P1 enqueuing message: "${payload}"`, 'info');
+ 
+  const t1 = setTimeout(() => {
+    if (!state.running || state.paused) return;
+    if (mqMessages.length >= 4) {
+
+      addLog('⚠ Queue full — P1 blocked (bottleneck)!', 'warning');
+      setProcessState('p1', STATES.BLOCKED);
+      triggerAlert('bottleneck', 'bottleneck');
+      state.bottleneckActive = true;
+      const t2 = setTimeout(() => {
+        if (!state.running) return;
+        clearAlert('bottleneck');
+        state.bottleneckActive = false;
+
+        mqDequeue();
+        const tR = setTimeout(runMQSimulation, delay(1000));
+        state.timers.push(tR);
+      }, delay(2000));
+      state.timers.push(t2);
+      return;
+    }
+ 
+
+    mqEnqueue(payload);
+    state.metrics.p1Sent++;
+    updateMetricDisplay();
+    setProcessState('p1', STATES.WAITING);
+ 
+
+    const t3 = setTimeout(() => {
+      if (!state.running || state.paused) return;
+      if (mqMessages.length > 0) {
+        setProcessState('p2', STATES.RUNNING);
+        const msg = mqDequeue();
+        animatePacket(
+          document.getElementById('view-mq'),
+          p2, msg, 'mq-packet', () => {
+            if (!state.running) return;
+            state.metrics.p2Recv++;
+            updateMetricDisplay();
+            addLog(`P2 dequeued: "${msg}"`, 'success');
+            setProcessState('p2', STATES.WAITING);
+ 
+
+            const t4 = setTimeout(() => {
+              if (!state.running || state.paused) return;
+              setProcessState('p3', STATES.RUNNING);
+              addLog(`P3 monitoring queue — ${mqMessages.length} msgs remaining`, 'info');
+              const t5 = setTimeout(() => {
+                if (!state.running) return;
+                state.metrics.p3Recv++;
+                updateMetricDisplay();
+                setProcessState('p3', STATES.WAITING);
+                const tLoop = setTimeout(runMQSimulation, delay(1500));
+                state.timers.push(tLoop);
+              }, delay(500));
+              state.timers.push(t5);
+            }, delay(700));
+            state.timers.push(t4);
+          }
+        );
+      }
+    }, delay(800));
+    state.timers.push(t3);
+  }, delay(500));
+  state.timers.push(t1);
+}
+ 
+function mqEnqueue(msg) {
+  if (mqMessages.length >= 4) return;
+  mqMessages.push(msg);
+  refreshMQDisplay();
+}
+ 
+function mqDequeue() {
+  const msg = mqMessages.shift();
+  refreshMQDisplay();
+  return msg;
+}
+ 
+function refreshMQDisplay() {
+  const slots = document.querySelectorAll('.mq-slot');
+  slots.forEach((slot, i) => {
+    if (i < mqMessages.length) {
+      slot.className = 'mq-slot filled' + (i === 3 ? ' urgent' : '');
+      slot.textContent = mqMessages[i];
+    } else {
+      slot.className = 'mq-slot';
+      slot.textContent = 'empty';
+    }
+  });
+  const pct = (mqMessages.length / 4) * 100;
+  const fill = document.getElementById('mq-fill');
+  fill.style.width = pct + '%';
+  fill.className = 'mq-size-fill' + (pct >= 75 ? ' overload' : '');
+  document.getElementById('mq-count').textContent = `${mqMessages.length}/4`;
+}
+ 
+
+
+
+function runSHMSimulation() {
+  if (!state.running || state.paused) return;
+  const payload = document.getElementById('msg-input').value || 'DATA';
+  const delay   = ms => ms / state.speed;
+ 
+  const segs = document.querySelectorAll('.shm-seg');
+ 
+
+  setProcessState('p1', STATES.RUNNING);
+  setSHMLock('P1', true);
+  addLog('P1 acquiring write lock on shared memory', 'info');
+ 
+  const t1 = setTimeout(() => {
+    if (!state.running || state.paused) return;
+    const segIdx = Math.floor(Math.random() * 8);
+    const seg = segs[segIdx];
+    seg.className = 'shm-seg write-access';
+    seg.textContent = payload.slice(0, 4);
+    seg.innerHTML += '<span class="shm-lock-icon">✎</span>';
+    state.shmData[segIdx] = payload.slice(0, 4);
+    setSHMIndicator('p1', 'active-write');
+    addLog(`P1 wrote "${payload.slice(0,4)}" → seg[${segIdx}]`, 'success');
+    state.metrics.p1Sent++;
+    updateMetricDisplay();
+ 
+
+    const t2 = setTimeout(() => {
+      if (!state.running || state.paused) return;
+      setProcessState('p1', STATES.WAITING);
+      setProcessState('p2', STATES.RUNNING);
+      setSHMLock('P2', false);
+      seg.className = 'shm-seg read-access';
+      seg.innerHTML = seg.textContent.replace('<span class="shm-lock-icon">✎</span>','');
+      seg.innerHTML += '<span class="shm-lock-icon">👁</span>';
+      setSHMIndicator('p1', '');
+      setSHMIndicator('p2', 'active-read');
+      addLog(`P2 read "${state.shmData[segIdx]}" ← seg[${segIdx}]`, 'success');
+      state.metrics.p2Recv++;
+      updateMetricDisplay();
+ 
+
+      const t3 = setTimeout(() => {
+        if (!state.running || state.paused) return;
+        setProcessState('p3', STATES.RUNNING);
+        setSHMIndicator('p3', 'active-read');
+        addLog(`P3 also read seg[${segIdx}] — concurrent read OK`, 'info');
+        state.metrics.p3Recv++;
+        updateMetricDisplay();
+ 
+        const t4 = setTimeout(() => {
+          if (!state.running) return;
+          seg.className = 'shm-seg';
+          seg.textContent = state.shmData[segIdx];
+          setSHMIndicator('p2', '');
+          setSHMIndicator('p3', '');
+          setSHMLock('', false);
+          setProcessState('p2', STATES.WAITING);
+          setProcessState('p3', STATES.WAITING);
+ 
+          const tLoop = setTimeout(runSHMSimulation, delay(1600));
+          state.timers.push(tLoop);
+        }, delay(600));
+        state.timers.push(t4);
+      }, delay(500));
+      state.timers.push(t3);
+    }, delay(900));
+    state.timers.push(t2);
+  }, delay(500));
+  state.timers.push(t1);
+}
+ 
+function setSHMLock(owner, write) {
+  const el = document.getElementById('shm-lock-status');
+  if (!owner) { el.textContent = 'UNLOCKED 🔓'; return; }
+  el.textContent = write ? `LOCKED by ${owner} ✏ 🔒` : `READ by ${owner} 👁`;
+}
+ 
+function setSHMIndicator(proc, cls) {
+  const el = document.getElementById(`shm-ind-${proc}`);
+  el.className = `shm-indicator ${cls}`;
+}
+ 
+
+
+
+function manualSend() {
+  if (!state.running) {
+    addLog('⚠ Start the simulation first!', 'warning');
+    return;
+  }
+  const payload = document.getElementById('msg-input').value || 'Data';
+  const p1 = document.getElementById('proc-p1');
+  const p2 = document.getElementById('proc-p2');
+  const pktClass = { pipe:'pipe-packet', mq:'mq-packet', shm:'shm-packet' }[state.method];
+  animatePacket(p1, p2, payload, pktClass, () => {
+    addLog(`Manual: P1 → P2: "${payload}"`, 'success');
+    state.metrics.p1Sent++;
+    state.metrics.p2Recv++;
+    updateMetricDisplay();
+  });
+}
+ 
+
+
+
+function pauseSimulation() {
+  if (!state.running) return;
+  if (state.paused) {
+
+    state.paused = false;
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-pause').textContent = '⏸ Pause';
+    addLog('Simulation resumed.', 'info');
+    setGlobalStatus('', 'Running');
+    runSimulationLoop();
+  } else {
+    state.paused = true;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-pause').textContent = '▶ Resume';
+    addLog('Simulation paused.', 'warning');
+    setGlobalStatus('idle', 'Paused');
+    clearTimers();
+  }
+}
+ 
+
+
+
+function resetSimulation() {
+  state.running = false;
+  state.paused = false;
+  state.deadlockActive = false;
+  state.raceActive = false;
+  state.bottleneckActive = false;
+  state.inconsistActive = false;
+  state.tick = 0;
+  mqMessages = [];
+ 
+  clearTimers();
+  clearPerfTimer();
+ 
+  ['p1','p2','p3'].forEach(p => setProcessState(p, STATES.IDLE));
+ 
+
+  document.querySelectorAll('.data-packet').forEach(p => p.remove());
+ 
+
+  refreshMQDisplay();
+ 
+
+  document.querySelectorAll('.shm-seg').forEach(s => { s.className = 'shm-seg'; s.textContent = '—'; });
+  ['p1','p2','p3'].forEach(p => setSHMIndicator(p, ''));
+  setSHMLock('', false);
+ 
+
+  document.getElementById('arrow-p1p2').classList.remove('active','blocked');
+  document.getElementById('arrow-p2p3').classList.remove('active','blocked');
+ 
+
+  ['deadlock','race','bottleneck','inconsist'].forEach(clearAlert);
+ 
+
+  resetMetrics();
+  updateMetricDisplay();
+  updatePerfBars(0, 0, 0, 0);
+ 
+
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-pause').disabled = true;
+  document.getElementById('btn-pause').textContent = '⏸ Pause';
+ 
+  setGlobalStatus('idle', 'Idle');
+  addLog('Simulation reset.', 'system');
+}
+ 
+function clearTimers() {
+  state.timers.forEach(t => clearTimeout(t));
+  state.timers = [];
+}
+ 
+
+
+
+ 
+
+function injectDeadlock() {
+  if (state.deadlockActive) return;
+  state.deadlockActive = true;
+  clearTimers();
+  state.running = false;
+ 
+  setProcessState('p1', STATES.BLOCKED);
+  setProcessState('p2', STATES.BLOCKED);
+  setProcessState('p3', STATES.WAITING);
+ 
+  document.getElementById('arrow-p1p2').classList.add('blocked');
+  document.getElementById('arrow-p2p3').classList.add('blocked');
+ 
+  triggerAlert('deadlock', 'deadlock');
+  setGlobalStatus('error', 'DEADLOCK');
+  addLog('🔴 DEADLOCK DETECTED: P1 waiting for P2, P2 waiting for P1!', 'error');
+  addLog('System halted — circular dependency found.', 'error');
+ 
+
+  const t = setTimeout(() => {
+    addLog('Deadlock resolved by OS timeout (recovery).', 'system');
+    clearAlert('deadlock');
+    document.getElementById('arrow-p1p2').classList.remove('blocked');
+    document.getElementById('arrow-p2p3').classList.remove('blocked');
+    resetSimulation();
+  }, 4000 / state.speed);
+  state.timers.push(t);
+}
+ 
+
+function injectRaceCondition() {
+  if (state.raceActive) return;
+  state.raceActive = true;
+ 
+  const segs = document.querySelectorAll('.shm-seg');
+  const segIdx = 3;
+ 
+  triggerAlert('race', 'race');
+  setGlobalStatus('error', 'RACE CONDITION');
+  setProcessState('p1', STATES.RUNNING);
+  setProcessState('p2', STATES.RUNNING);
+  setSHMIndicator('p1', 'race');
+  setSHMIndicator('p2', 'race');
+ 
+  segs[segIdx].className = 'shm-seg race-condition';
+  segs[segIdx].textContent = '???';
+ 
+  addLog('⚡ RACE CONDITION: P1 and P2 simultaneously writing seg[3]!', 'error');
+  addLog('Data corruption possible — undefined state!', 'error');
+ 
+
+  if (state.method !== 'shm') {
+    addLog('(Switch to Shared Memory view to see visual effect)', 'system');
+  }
+ 
+  const t = setTimeout(() => {
+    segs[segIdx].className = 'shm-seg';
+    segs[segIdx].textContent = 'COR';
+    setSHMIndicator('p1', '');
+    setSHMIndicator('p2', '');
+    clearAlert('race');
+    state.raceActive = false;
+    addLog('Race condition resolved — data may be corrupted.', 'warning');
+  }, 3000 / state.speed);
+  state.timers.push(t);
+}
+ 
+
+function injectBottleneck() {
+  triggerAlert('bottleneck', 'bottleneck');
+  addLog('🟡 BOTTLENECK: Flooding queue with messages...', 'warning');
+ 
+  const msgs = ['FLOOD1','FLOOD2','FLOOD3','FLOOD4'];
+  msgs.forEach(m => mqMessages.push(m));
+  if (mqMessages.length > 4) mqMessages = mqMessages.slice(-4);
+  refreshMQDisplay();
+ 
+  setProcessState('p2', STATES.WAITING);
+  addLog('P2 processing queue slowly — consumers lagging!', 'warning');
+ 
+  const t = setTimeout(() => {
+    mqMessages = [];
+    refreshMQDisplay();
+    clearAlert('bottleneck');
+    addLog('Bottleneck cleared — queue drained.', 'info');
+  }, 3500 / state.speed);
+  state.timers.push(t);
+}
+ 
+
+function injectInconsistency() {
+  const payloads = ['HEL', '??O', 'H???'];
+  triggerAlert('inconsist', 'inconsist');
+  addLog('🟣 DATA INCONSISTENCY: Sending partial/corrupt data packets!', 'error');
+ 
+  payloads.forEach((p, i) => {
+    const t = setTimeout(() => {
+      if (!state.running) {
+        addLog(`Corrupt packet [${i+1}/3]: "${p}" detected`, 'error');
+        return;
+      }
+      const p1 = document.getElementById('proc-p1');
+      const p2 = document.getElementById('proc-p2');
+      animatePacket(p1, p2, p, 'pipe-packet', () => {
+        addLog(`Corrupt packet: "${p}" — Expected "Hello"!`, 'error');
+      });
+    }, (i * 600) / state.speed);
+    state.timers.push(t);
+  });
+ 
+  const t2 = setTimeout(() => {
+    clearAlert('inconsist');
+    addLog('Inconsistency scenario complete.', 'system');
+  }, 3000 / state.speed);
+  state.timers.push(t2);
+}
+ 
+
+
+
+let perfTimer = null;
+function startPerfUpdate() {
+  perfTimer = setInterval(() => {
+    if (!state.running || state.paused) return;
+    const t = (Date.now() - state.startTime) / 1000;
+    const throughput = Math.min(100, Math.round(state.metrics.p1Sent * 8 / Math.max(t, 1) * 10));
+    const latency    = Math.min(100, 30 + Math.floor(Math.random() * 20));
+    const cpu        = Math.min(100, 15 + Math.floor(Math.random() * 30));
+    const mem        = Math.min(100, 20 + Math.floor(Math.random() * 15));
+    updatePerfBars(throughput, latency, cpu, mem);
+  }, 1200);
+}
+ 
+function clearPerfTimer() { clearInterval(perfTimer); perfTimer = null; }
+ 
+function updatePerfBars(tp, lat, cpu, mem) {
+  document.getElementById('fill-throughput').style.width = tp + '%';
+  document.getElementById('val-throughput').textContent  = tp + '%';
+  document.getElementById('fill-latency').style.width = lat + '%';
+  document.getElementById('val-latency').textContent  = lat + 'ms';
+  document.getElementById('fill-cpu').style.width = cpu + '%';
+  document.getElementById('val-cpu').textContent  = cpu + '%';
+  document.getElementById('fill-mem').style.width = mem + '%';
+  document.getElementById('val-mem').textContent  = (mem * 0.5).toFixed(0) + 'MB';
+}
+ 
+function resetMetrics() {
+  state.metrics = { p1Sent: 0, p2Recv: 0, p3Recv: 0, throughput: 0, latency: 0, cpu: 0, mem: 0 };
+}
+ 
+function updateMetricDisplay() {
+  document.getElementById('metric-p1-sent').textContent = state.metrics.p1Sent;
+  document.getElementById('metric-p2-recv').textContent = state.metrics.p2Recv;
+  document.getElementById('metric-p3-recv').textContent = state.metrics.p3Recv;
+}
+ 
+
+
+
+function updateSpeed(val) {
+  state.speed = parseFloat(val);
+  document.getElementById('speed-label').textContent = val + '×';
+}
+ 
+
+
+
+function clearLog() {
+  const scroll = document.getElementById('log-scroll');
+  scroll.innerHTML = '';
+  addLog('Log cleared.', 'system');
+}
+ 
+
+
+
+document.addEventListener('DOMContentLoaded', () => {
+  switchMethod('pipe');
+  addLog('Ready. Select an IPC method tab and press ▶ Start.', 'system');
+  addLog('You can also inject scenarios to observe debug detection.', 'system');
+});
